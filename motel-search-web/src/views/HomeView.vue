@@ -198,6 +198,8 @@ const initMap = async (item) => {
     map.fitBounds(L.latLngBounds([[centerLat, centerLng], [lat, lng]]), { padding: [30, 30], maxZoom: 16 })
   }
   mapInstances.value[mapId] = map
+  setTimeout(() => { if (mapInstances.value[mapId]) mapInstances.value[mapId].invalidateSize() }, 250)
+  setTimeout(() => { if (mapInstances.value[mapId]) mapInstances.value[mapId].invalidateSize() }, 600)
 }
 
 // ─── Chat State ───────────────────────────────────────────────────────────────
@@ -383,6 +385,9 @@ const handleSearch = async () => {
               }
             }
             foundCards.forEach(item => {
+              if (item.ui_type === 'A2UI_Card' && item.data?.lat != null && item.data?.lng != null) {
+                item.ui_type = 'A2UI_MapCard'
+              }
               pushMessage({ role: 'ai', type: 'room-card', ui_type: item.ui_type, data: item.data })
             })
             // Init Leaflet maps after DOM renders
@@ -408,7 +413,12 @@ const handleSearch = async () => {
                   const introText = rawTextBuffer.substring(0, first).replace(/```json/g, '').replace(/```/g, '').trim()
                   if (introText) pushMessage({ role: 'ai', type: 'text', content: introText })
                 }
-                inner.forEach(item => pushMessage({ role: 'ai', type: 'room-card', ui_type: item.ui_type, data: item.data }))
+                inner.forEach(item => {
+                  if (item.ui_type === 'A2UI_Card' && item.data?.lat != null && item.data?.lng != null) {
+                    item.ui_type = 'A2UI_MapCard'
+                  }
+                  pushMessage({ role: 'ai', type: 'room-card', ui_type: item.ui_type, data: item.data })
+                })
                 nextTick(() => inner.forEach(item => { if (item.ui_type === 'A2UI_MapCard') initMap(item) }))
                 return
               }

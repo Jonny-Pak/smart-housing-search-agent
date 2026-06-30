@@ -65,6 +65,8 @@ def query_database(price_max: int = 5000000, property_type: str = None, user_lat
                     address,
                     COALESCE(phone, 'Đang cập nhật') AS phone,
                     COALESCE(property_type, 'phong_tro') AS property_type,
+                    ST_Y(geom::geometry) AS lat,
+                    ST_X(geom::geometry) AS lng,
                     ST_DistanceSphere(geom::geometry, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geometry) AS distance_meters
                 FROM motel_rooms
                 WHERE {where_clause}
@@ -80,7 +82,9 @@ def query_database(price_max: int = 5000000, property_type: str = None, user_lat
                     price,
                     address,
                     COALESCE(phone, 'Đang cập nhật') AS phone,
-                    COALESCE(property_type, 'phong_tro') AS property_type
+                    COALESCE(property_type, 'phong_tro') AS property_type,
+                    ST_Y(geom::geometry) AS lat,
+                    ST_X(geom::geometry) AS lng
                 FROM motel_rooms
                 WHERE {where_clause}
                 ORDER BY price ASC
@@ -103,6 +107,10 @@ def query_database(price_max: int = 5000000, property_type: str = None, user_lat
                 row_dict['price'] = float(row_dict['price'])
             if 'distance_meters' in row_dict and row_dict['distance_meters'] is not None:
                 row_dict['distance_meters'] = round(float(row_dict['distance_meters']))
+            if 'lat' in row_dict and row_dict['lat'] is not None:
+                row_dict['lat'] = float(row_dict['lat'])
+            if 'lng' in row_dict and row_dict['lng'] is not None:
+                row_dict['lng'] = float(row_dict['lng'])
             formatted_results.append(row_dict)
         return formatted_results
 
@@ -125,10 +133,11 @@ def spatial_radius_search(lat: float, lng: float, radius_meters: int = 500000, p
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
         conditions = [
+            "ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)",
             "is_active = TRUE",
             "expires_at > NOW()"
         ]
-        params = []
+        params = [lng, lat, radius_meters]
         pt = normalize_property_type(property_type)
         if pt:
             conditions.append("property_type = %s")
@@ -144,6 +153,8 @@ def spatial_radius_search(lat: float, lng: float, radius_meters: int = 500000, p
                 address,
                 COALESCE(phone, 'Đang cập nhật') AS phone,
                 COALESCE(property_type, 'phong_tro') AS property_type,
+                ST_Y(geom::geometry) AS lat,
+                ST_X(geom::geometry) AS lng,
                 ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS distance_meters
             FROM motel_rooms
             WHERE {where_clause}
@@ -169,9 +180,10 @@ def spatial_radius_search(lat: float, lng: float, radius_meters: int = 500000, p
             if 'distance_meters' in row_dict and row_dict['distance_meters'] is not None:
                 row_dict['distance_meters'] = round(float(row_dict['distance_meters']))
 
-            # Append center coordinates so the frontend can render the map
-            row_dict['lat'] = lat
-            row_dict['lng'] = lng
+            if 'lat' in row_dict and row_dict['lat'] is not None:
+                row_dict['lat'] = float(row_dict['lat'])
+            if 'lng' in row_dict and row_dict['lng'] is not None:
+                row_dict['lng'] = float(row_dict['lng'])
 
             formatted_results.append(row_dict)
 
@@ -371,13 +383,13 @@ simple_search_agent = LlmAgent(
         "1. Nếu người dùng hỏi tư vấn ngân sách từ thu nhập/lương (ví dụ: 'Lương tôi 12 triệu một tháng, nên thuê phòng giá nào là hợp lý?'), BẮT BUỘC gọi tool 'calculate_affordability' với tham số 'monthly_income' (chuyển đổi sang số nguyên VND). "
         "Sau đó BẮT BUỘC tiếp tục gọi 'query_database' với tham số 'price_max' chính là mức ngân sách tối đa (max_budget) để tìm các phòng trọ/nhà đang cho thuê phù hợp với túi tiền đó. "
         "Khi trả về kết quả cho người dùng, bạn MUST BẮT ĐẦU bằng một câu nói giới thiệu tự nhiên và chân thực (Ví dụ: 'Dựa vào mức lương 12 triệu thì tôi gợi ý cho bạn khoảng ngân sách hợp lý và một số phòng / nhà đang cho thuê sau:'). "
-        "Ngay sau câu nói giới thiệu đó, mới trả về một JSON array bắt đầu bằng [ và kết thúc bằng ], trong đó object đầu tiên là thẻ 'ui_type': 'A2UI_BudgetAdvice' (chứa 'monthly_income', 'min', 'max', 'advice'...) và các object tiếp theo là các thẻ phòng trọ tìm được ('ui_type': 'A2UI_Card').\n"
+        "Ngay sau câu nói giới thiệu đó, mới trả về một JSON array bắt đầu bằng [ và kết thúc bằng ], trong đó object đầu tiên là thẻ 'ui_type': 'A2UI_BudgetAdvice' (chứa 'monthly_income', 'min', 'max', 'advice'...) và các object tiếp theo là các thẻ phòng trọ tìm được ('ui_type': 'A2UI_MapCard' nếu có lat/lng, hoặc 'A2UI_Card').\n"
         "2. Nếu người dùng yêu cầu 'Tìm phòng phù hợp với ngân sách đó', 'phù hợp với mức tư vấn trên', hãy xác định mức ngân sách tối đa từ câu tư vấn trước và truyền vào 'price_max' khi gọi 'query_database'.\n"
         "3. Extract the maximum price from the user's query (e.g., '3 million VND' or '3 triệu' means 3000000).\n"
         "4. If user location payload coordinates (lat, lng) are provided in the prompt, pass them to 'user_lat' and 'user_lng'. "
         "You MUST call 'query_database' passing 'price_max', 'property_type', 'user_lat', and 'user_lng'.\n"
-        "5. For each room result, wrap it in a JSON object with 'ui_type': 'A2UI_Card' and 'data' "
-        "   (ensure 'data' strictly includes 'id', 'title', 'price', 'address', 'phone', and 'distance_meters' if available).\n"
+        "5. For each room result, wrap it in a JSON object with 'ui_type': 'A2UI_MapCard' (if 'lat' and 'lng' exist) or 'A2UI_Card' and 'data' "
+        "   (ensure 'data' strictly includes 'id', 'title', 'price', 'address', 'phone', 'lat', 'lng', and 'distance_meters' if available).\n"
         "6. Khi trả về danh sách phòng trọ tìm kiếm thông thường, bạn MUST BẮT ĐẦU bằng một câu giới thiệu tự nhiên và chân thực (Ví dụ: 'Dưới đây là danh sách các phòng trọ/nhà phù hợp với yêu cầu của bạn:'). "
         "Ngay sau câu giới thiệu đó, trả về JSON array bắt đầu bằng [ và kết thúc bằng ] chứa các thẻ phòng trọ. Do NOT wrap in markdown code blocks. "
         "If the database returns 0 results, DO NOT return an empty array [] or any brackets. Simply output a helpful natural language explanation.\n"
