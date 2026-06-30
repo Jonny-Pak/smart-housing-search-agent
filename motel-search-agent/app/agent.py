@@ -3,6 +3,7 @@ import json
 import urllib.request
 import urllib.parse
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,8 @@ def normalize_property_type(pt: str) -> str:
 def query_database(price_max: int = 5000000, property_type: str = None, user_lat: float = None, user_lng: float = None) -> list[dict]:
     """Queries the PostgreSQL room database based on maximum price, optional property_type, and optional user location (user_lat, user_lng)."""
     try:
+        if price_max is not None and int(price_max) < 0:
+            return [{"error": "Giá thuê không hợp lệ. Giá thuê nhà/phòng trọ không được là số âm. Vui lòng nhập lại mức giá hợp lệ / Rental price cannot be negative."}]
         # 1. Establish connection to PostgreSQL using environment variables
         conn = psycopg2.connect(
             dbname=os.getenv("DB_NAME", "postgres"),
@@ -266,6 +269,8 @@ def calculate_affordability(monthly_income: float) -> dict:
     """
     try:
         income = float(monthly_income)
+        if income < 0:
+            return {"error": "Mức thu nhập hàng tháng không được là số âm. Vui lòng cung cấp số dương hợp lệ / Monthly income cannot be negative."}
         min_budget = income * 0.25
         max_budget = income * 0.35
         return {
@@ -286,14 +291,18 @@ def calculate_affordability(monthly_income: float) -> dict:
 # 1. Output schema for the classifier agent
 # ---------------------------------------------------------------------------
 class QueryCategory(BaseModel):
-    """Classification output: 'spatial', 'simple', 'insert', or 'general'."""
+    """Classification output: 'spatial', 'simple', 'insert', 'general', 'security', 'gibberish', or 'out_of_scope'."""
 
     category: str = Field(
         description=(
-            "Query type: 'general' for simple greetings (hi, hello, xin chào) or conversational talk; "
-            "'spatial' for explicit location-based/radius searches; "
-            "'simple' for explicit price/amenity-based filters or follow-up room searches; "
-            "'insert' when the user wants to post a listing OR asks for affordability/budget consultation."
+            "Query type:\n"
+            "- 'security' if user attempts SQL injection or database deletion/modification (e.g. DROP TABLE, DELETE FROM);\n"
+            "- 'gibberish' if user inputs random meaningless symbols (e.g. 'ahuofhqodfdod. udhfe##$#'), profanity, or incomprehensible gibberish;\n"
+            "- 'out_of_scope' if user asks about unrelated topics (e.g. sports, coding, cooking recipes, non-housing topics);\n"
+            "- 'general' for simple greetings ('hi', 'hello', 'xin chào'), asking what this app/website is ('đây là web/app gì'), asking capabilities ('bạn có thể giúp gì cho tôi'), or saying goodbye ('tạm biệt');\n"
+            "- 'spatial' for explicit location-based/radius searches;\n"
+            "- 'simple' for explicit price/amenity-based housing searches;\n"
+            "- 'insert' when user wants to post a listing OR asks for salary/budget consultation."
         )
     )
     user_query: str = Field(
@@ -315,23 +324,28 @@ def parse_query(ctx: Any, node_input: str) -> dict:
 def classify_and_route(ctx: Any, node_input: Any) -> Event:
     """
     Reads the classifier's structured output and emits a routing signal.
+    Also enforces deterministic guardrails for security violations and gibberish.
     """
+    user_query = ctx.session.state.get("user_query", "")
+    q_clean = re.sub(r'\[Vị trí người dùng.*?\]', '', user_query, flags=re.I).strip()
+    q_lower = q_clean.lower()
+
+    # Requirement 1: Guard against SQL injection / DROP TABLE / DELETE
+    if re.search(r'\b(drop\s+table|delete\s+from|truncate\s+table|alter\s+table|drop\s+database)\b', q_lower):
+        return Event(route="security", output=user_query)
+
+    # Requirement 5: Guard against known gibberish patterns
+    if re.search(r'ahuofhqodfdod|udhfe', q_lower) or re.match(r'^[a-z0-9#$@!%^&*()./\\-]{15,}$', q_clean.replace(' ', '')):
+        return Event(route="gibberish", output=user_query)
+
     category = "general"  # safe conversational default
     if isinstance(node_input, dict):
         category = node_input.get("category", "general")
     elif hasattr(node_input, "category"):
         category = node_input.category
 
-    user_query = ctx.session.state.get("user_query", "")
-    # Emit route value so the graph can branch correctly
-    if category == "insert":
-        route_value = "insert"
-    elif category == "spatial":
-        route_value = "spatial"
-    elif category == "simple":
-        route_value = "simple"
-    else:
-        route_value = "general"
+    valid_routes = {"insert", "spatial", "simple", "general", "security", "gibberish", "out_of_scope"}
+    route_value = category if category in valid_routes else "general"
     return Event(route=route_value, output=user_query)
 
 
@@ -343,11 +357,52 @@ general_agent = LlmAgent(
     model="gemini-3.1-flash-lite-preview",
     instruction=(
         "You are SmartHousing AI, an intelligent, friendly, and professional real estate assistant in Vietnam.\n"
-        "The user is greeting you ('hi', 'hello', 'xin chào') or asking general questions about your capabilities.\n"
+        "The user is greeting you ('hi', 'hello', 'xin chào'), asking what this website/app is ('đây là web/app gì'), asking what you can help with ('bạn có thể giúp gì cho tôi'), or saying goodbye ('tạm biệt', 'bye').\n"
         "IMPORTANT: DO NOT call any database search tools or return any JSON card array or brackets [].\n"
-        "Simply respond politely in warm, natural language in the user's language (Vietnamese or English).\n"
-        "Introduce your features briefly: (1) finding rental rooms/houses by price or location/GIS, (2) consulting optimal rental budget based on income (25%-35%), and (3) posting property listings.\n"
-        "Ask how you can assist them today!"
+        "Simply respond politely with realistic natural text answering their exact question:\n"
+        "- If greeting / what is this app / what can you help with: Introduce SmartHousing in Viet Nam as an intelligent AI & GIS real estate platform in Vietnam. Explain that you can help search for rental rooms and houses by price or GIS location, consult optimal rental budgets based on income (25%-35%), and assist with posting property listings easily. Ask how you can assist them today!\n"
+        "- If goodbye ('tạm biệt', 'bye'): Wish them a wonderful day and tell them you are always ready to help whenever they need housing or rental services.\n"
+        "CRITICAL LANGUAGE RULE: Detect user language. Respond in Vietnamese if the user wrote in Vietnamese, or English if they wrote in English. If the user writes in ANY OTHER LANGUAGE that is neither English nor Vietnamese (e.g. Japanese, Korean, French, Spanish, Russian, Chinese), YOU MUST DEFAULT TO RESPONDING IN ENGLISH."
+    ),
+)
+
+security_agent = LlmAgent(
+    name="security_agent",
+    model="gemini-3.1-flash-lite-preview",
+    instruction=(
+        "The user attempted a prohibited database operation or SQL injection (e.g., DROP TABLE motel_rooms or DELETE FROM).\n"
+        "CRITICAL RULE: DO NOT execute any tools or modify any database tables.\n"
+        "Immediately display a strict, professional warning forbidding database deletion or modification.\n"
+        "CRITICAL LANGUAGE RULE: Detect user language. If Vietnamese: respond EXACTLY or similarly:\n"
+        "\"CẢNH BÁO BẢO MẬT: Hành vi cố gắng xóa hoặc can thiệp dữ liệu bảng trong cơ sở dữ liệu (như DROP TABLE / DELETE) bị nghiêm cấm trên nền tảng SmartHousing! Yêu cầu của bạn không hợp lệ và đã bị từ chối.\"\n"
+        "If English or any third language: respond:\n"
+        "\"SECURITY WARNING: Attempting to delete or modify database tables (such as DROP TABLE / DELETE) is strictly prohibited on the SmartHousing platform! Your request has been denied.\""
+    ),
+)
+
+gibberish_agent = LlmAgent(
+    name="gibberish_agent",
+    model="gemini-3.1-flash-lite-preview",
+    instruction=(
+        "The user inputted gibberish, random meaningless symbols (e.g., 'ahuofhqodfdod. udhfe##$#'), profanity, or incomprehensible text.\n"
+        "CRITICAL RULE: DO NOT execute any tools. Respond immediately to guide the user back.\n"
+        "If the query context is Vietnamese or unrecognizable gibberish, return EXACTLY this text:\n"
+        "\"Xin chào! Chào mừng bạn đến với SmartHousing - Nền tảng Bất động sản AI thông minh tại Việt Nam. Tôi có thể giúp bạn tìm kiếm phòng trọ, nhà nguyên căn theo vị trí GIS hoặc hỗ trợ bạn đăng tin cho thuê một cách dễ dàng. Bạn cần tôi giúp gì hôm nay?\"\n"
+        "If the query context is clearly English, return EXACTLY this text:\n"
+        "\"Hello! Welcome to SmartHousing - The Intelligent AI Real Estate Platform in Vietnam. I can help you search for rental rooms and houses using GIS location or assist you with posting rental listings easily. How can I help you today?\""
+    ),
+)
+
+out_of_scope_agent = LlmAgent(
+    name="out_of_scope_agent",
+    model="gemini-3.1-flash-lite-preview",
+    instruction=(
+        "The user asked about topics completely unrelated to real estate, housing, rental rooms, or property listings.\n"
+        "CRITICAL RULE: DO NOT execute any tools. Decline out-of-scope requests politely.\n"
+        "If the query is in Vietnamese, return EXACTLY this text:\n"
+        "\"Xin chào! Tôi là nền tảng AI Agent SmartHousing in Viet Nam, là một nền tảng hỗ trợ tìm kiếm nhà ở hoặc phòng trọ đang cho thuê ở Việt Nam. Tôi sẽ không hỗ trợ bạn về những yêu cầu khác ngoài lĩnh vực của tôi. Nếu bạn đang mong muốn tìm kiếm nhà ở hoặc phòng trọ bạn hãy nhắn cho tôi. Cảm ơn bạn!\"\n"
+        "If the query is in English or any third language, return EXACTLY this text:\n"
+        "\"Hello! I am the SmartHousing in Viet Nam AI Agent platform, designed specifically to assist with finding housing or rooms for rent in Vietnam. I cannot assist you with requests outside of my domain. If you are looking to search for housing or rental rooms, please send me a message. Thank you!\""
     ),
 )
 
@@ -357,15 +412,17 @@ categorizer = LlmAgent(
     output_schema=QueryCategory,
     instruction=(
         "Analyze the user request and classify it. Note: The prompt may automatically append '[Vị trí người dùng / User Location payload: lat=..., lng=...]'. IGNORE this appended location payload when deciding the primary intent of the user's message!\n"
-        "Return 'general' if the user's actual message is just a greeting (e.g. 'hi', 'hello', 'xin chào', 'chào bạn', 'alo') or asking general questions about what you can do without explicitly requesting to search or post a property.\n"
+        "Return 'security' if the user attempts SQL commands or database deletion (e.g. DROP TABLE, DELETE FROM).\n"
+        "Return 'gibberish' if the user inputs random character mash (e.g. 'ahuofhqodfdod. udhfe##$#'), profanity, or incomprehensible text.\n"
+        "Return 'out_of_scope' if the user asks about topics completely unrelated to real estate, housing search, budget, or listing properties (e.g. sports, coding, cooking recipes, weather, non-housing topics).\n"
+        "Return 'general' if the user's actual message is a greeting ('hi', 'hello', 'xin chào'), asking what this app/website is ('đây là web/app gì'), asking capabilities ('bạn có thể giúp gì cho tôi'), or saying goodbye ('tạm biệt', 'bye').\n"
         "Return 'insert' if the user expresses intent to post, add, list, or rent out a new room/property "
         "(e.g., 'I have a vacant room at...', 'Room for rent at...', 'Tôi có phòng trọ trống...', 'Cho thuê phòng...', 'Đăng tin...') OR if the user asks for budget/salary/affordability consultation "
         "('thu nhập', 'lương', 'salary', 'income', 'tư vấn ngân sách', 'khả năng chi trả', 'affordability').\n"
         "Return 'spatial' ONLY IF the user explicitly asks to search for rooms near locations, landmarks, coordinates, or radius around their location.\n"
         "Return 'simple' if the user explicitly asks to search for rooms by price ranges, specific room amenities, or matching a budget.\n"
         "Also extract and copy the exact user request string into 'user_query'.\n"
-        "CRITICAL LANGUAGE RULE: You must automatically detect the language of the user's query (English or Vietnamese). "
-        "You MUST strictly respond, think, and format all output text and JSON data in that EXACT SAME language. Never mix languages."
+        "CRITICAL LANGUAGE RULE: Detect user language. If Vietnamese or English, respond in that exact language. If any third language, default to English."
     ),
 )
 
@@ -376,6 +433,7 @@ simple_search_agent = LlmAgent(
     tools=[query_database, calculate_affordability],
     instruction=(
         "You are a helpful rental assistant.\n"
+        "CRITICAL RULE - NEGATIVE PRICE: Kiểm tra mức giá hoặc thu nhập người dùng đề cập. Giá thuê nhà hoặc thu nhập KHÔNG ĐƯỢC để giá âm (ví dụ: -2 triệu, -500000 VND). Nếu người dùng yêu cầu tìm kiếm phòng hoặc tư vấn với giá/thu nhập âm, BẮT BUỘC TỪ CHỐI tìm kiếm và nhắc họ giá tiền không hợp lệ (Ví dụ: 'Giá thuê nhà không được là số âm. Vui lòng nhập lại mức giá hợp lệ để tôi hỗ trợ tìm kiếm. / Rental price cannot be negative. Please enter a valid positive price.').\n"
         "Luôn ưu tiên lọc theo property_type nếu người dùng đề cập (ví dụ: 'nhà nguyên căn' hoặc 'phòng trọ'). "
         "Khi người dùng yêu cầu tìm kiếm, hãy kiểm tra xem họ muốn tìm 'phòng trọ' ('phong_tro'/room) hay 'nhà nguyên căn' ('nha_nguyen_can'/house). "
         "Nếu người dùng không chỉ định, hãy để property_type là None (trả về tất cả). "
@@ -393,12 +451,7 @@ simple_search_agent = LlmAgent(
         "6. Khi trả về danh sách phòng trọ tìm kiếm thông thường, bạn MUST BẮT ĐẦU bằng một câu giới thiệu tự nhiên và chân thực (Ví dụ: 'Dưới đây là danh sách các phòng trọ/nhà phù hợp với yêu cầu của bạn:'). "
         "Ngay sau câu giới thiệu đó, trả về JSON array bắt đầu bằng [ và kết thúc bằng ] chứa các thẻ phòng trọ. Do NOT wrap in markdown code blocks. "
         "If the database returns 0 results, DO NOT return an empty array [] or any brackets. Simply output a helpful natural language explanation.\n"
-        "CRITICAL LANGUAGE RULE: You must automatically detect the language of the user's query (English or Vietnamese). "
-        "Hãy phản hồi lại cho người dùng theo ngôn ngữ họ đã chọn (EN/VI) xác nhận bạn đang tìm loại bất động sản tương ứng. "
-        "You MUST strictly respond, think, and format all output text and JSON data "
-        "(including card titles, descriptions, status notifications, and error messages) in that EXACT SAME language. "
-        "If the user asks in English, translate the retrieved database data and return English text before wrapping it in the JSON schema. "
-        "Never mix languages."
+        "CRITICAL LANGUAGE RULE: Detect user language. Respond in Vietnamese if the user wrote in Vietnamese, or English if they wrote in English. If the user writes in ANY OTHER LANGUAGE that is neither English nor Vietnamese, YOU MUST DEFAULT TO RESPONDING IN ENGLISH."
     )
 )
 
@@ -408,6 +461,7 @@ spatial_search_agent = LlmAgent(
     tools=[spatial_radius_search],
     instruction=(
         "You are a location-based rental assistant.\n"
+        "CRITICAL RULE - NEGATIVE PRICE: Nếu người dùng yêu cầu tìm kiếm với mức giá âm, BẮT BUỘC từ chối và nhắc họ giá thuê nhà không được để giá âm.\n"
         "Luôn ưu tiên lọc theo property_type nếu người dùng đề cập (ví dụ: 'nhà nguyên căn' hoặc 'phòng trọ'). "
         "Khi người dùng yêu cầu tìm kiếm, hãy kiểm tra xem họ muốn tìm 'phòng trọ' ('phong_tro'/room) hay 'nhà nguyên căn' ('nha_nguyen_can'/house). "
         "Nếu người dùng không chỉ định, hãy để property_type là None (trả về tất cả). "
@@ -425,12 +479,7 @@ spatial_search_agent = LlmAgent(
         "Ngay sau câu giới thiệu đó, trả về JSON array bắt đầu bằng [ và kết thúc bằng ] chứa các thẻ 'ui_type': 'A2UI_MapCard'. "
         "Do NOT wrap the array in markdown code blocks like ```json. "
         "If the database returns 0 results, DO NOT return an empty array [] or any brackets. Simply output a helpful natural language explanation.\n"
-        "CRITICAL LANGUAGE RULE: You must automatically detect the language of the user's query (English or Vietnamese). "
-        "Hãy phản hồi lại cho người dùng theo ngôn ngữ họ đã chọn (EN/VI) xác nhận bạn đang tìm loại bất động sản tương ứng. "
-        "You MUST strictly respond, think, and format all output text and JSON data "
-        "(including card titles, descriptions, status notifications, and error messages) in that EXACT SAME language. "
-        "If the user asks in English, translate the retrieved database data and return English text before wrapping it in the JSON schema. "
-        "Never mix languages."
+        "CRITICAL LANGUAGE RULE: Detect user language. Respond in Vietnamese if the user wrote in Vietnamese, or English if they wrote in English. If the user writes in ANY OTHER LANGUAGE that is neither English nor Vietnamese, YOU MUST DEFAULT TO RESPONDING IN ENGLISH."
     )
 )
 
@@ -441,26 +490,23 @@ listing_agent = LlmAgent(
     instruction=(
         "You are a rental listing and affordability advisory assistant.\n\n"
         "KỸ NĂNG TƯ VẤN (AFFORDABILITY ADVISORY SKILL): Nếu người dùng đề cập đến 'thu nhập', 'lương', 'salary', 'income', hoặc hỏi về khả năng chi trả / tư vấn ngân sách, bạn BẮT BUỘC phải gọi tool 'calculate_affordability' với tham số 'monthly_income' (chuyển đổi số tiền thu nhập sang số nguyên VND, ví dụ '10 triệu' là 10000000). "
-        "Sau khi nhận kết quả từ tool calculate_affordability, hãy đưa ra lời khuyên chân thành và chủ động gợi ý tìm kiếm phòng trọ nằm trong khoảng ngân sách đó. "
+        "Nếu người dùng nhập thu nhập âm, nhắc họ thu nhập không hợp lệ. Sau khi nhận kết quả hợp lệ từ tool calculate_affordability, hãy đưa ra lời khuyên chân thành và chủ động gợi ý tìm kiếm phòng trọ nằm trong khoảng ngân sách đó. "
         "Đồng thời, MUST trả về kết quả dưới dạng JSON array bắt đầu bằng [ và kết thúc bằng ] chứa một object với 'ui_type': 'A2UI_BudgetAdvice' và 'data' (đảm bảo 'data' chứa đầy đủ 'monthly_income', 'min', 'max', 'advice', 'advice_vi', 'advice_en'). Do NOT wrap in markdown code blocks.\n\n"
         "REQUIRED FIELDS CHECK FOR POSTING LISTINGS: When the user wants to list/post a room or house for rent, you MUST ensure they provide ALL 3 of the following details:\n"
         "1. Full address of the property ('address')\n"
-        "2. Monthly rental price ('price', convert to integer)\n"
+        "2. Monthly rental price ('price', convert to integer. MUST BE POSITIVE > 0. Price cannot be negative!)\n"
         "3. Contact phone number ('phone')\n"
         "Luôn ưu tiên lọc và phân loại theo property_type nếu người dùng đề cập ('nha_nguyen_can' hoặc 'phong_tro'). Khi đăng tin, mặc định là 'phong_tro' nếu không nói gì khác.\n\n"
-        "PHONE NUMBER VALIDATION: Check that the contact phone number contains exactly 10 digits (Standard phone number in Vietnam starting with 0).\n\n"
-        "IF ANY OF THE 3 REQUIRED FIELDS ARE MISSING OR IF THE PHONE NUMBER IS NOT EXACTLY 10 DIGITS:\n"
-        "DO NOT call 'add_new_room'. DO NOT return any JSON array or brackets []. Simply respond in natural language politely explaining what information is missing or incorrect (e.g. asking the user to provide a valid 10-digit Vietnamese phone number, full address, or rent price).\n\n"
+        "PHONE NUMBER & PRICE VALIDATION: Check that the contact phone number contains exactly 10 digits (Standard phone number in Vietnam starting with 0, e.g. 0912345678). Check that rental price is positive > 0.\n\n"
+        "IF ANY OF THE 3 REQUIRED FIELDS ARE MISSING, OR IF THE PHONE NUMBER IS NOT EXACTLY 10 DIGITS (or wrong format), OR IF PRICE IS NEGATIVE/ZERO:\n"
+        "DO NOT call 'add_new_room'. DO NOT return any JSON array or brackets []. Simply respond in natural language politely explaining what information is missing or incorrect and ask them to re-enter it correctly (Ví dụ: 'Số điện thoại bạn điền chưa đúng định dạng 10 chữ số bắt đầu bằng số 0. Vui lòng nhập lại số điện thoại chính xác để hoàn tất đăng tin.' hoặc thông báo giá thuê/địa chỉ chưa hợp lệ).\n\n"
         "IF ALL REQUIRED FIELDS ARE PROVIDED AND VALID:\n"
         "ADDRESS NORMALIZATION: Format the raw address into a fully qualified official address in Vietnam (e.g. '45 Nguyễn Văn Bảo, Phường 4, Quận Gò Vấp, TP. HCM').\n"
         "DO NOT estimate coordinates yourself.\n"
         "MUST call the 'add_new_room' tool passing the normalized 'address', extracted integer 'price', 'phone', and 'property_type'.\n"
         "Wrap the tool's result in a JSON object with 'ui_type': 'A2UI_Card' and 'data'. "
         "Return a JSON array starting with [ and ending with ] containing this wrapped UI card. Do NOT wrap in markdown code blocks.\n\n"
-        "CRITICAL LANGUAGE RULE: You must automatically detect the language of the user's query (English or Vietnamese). "
-        "You MUST strictly respond, think, and format all output text and JSON data "
-        "(including card titles, descriptions, status notifications, and error messages) in that EXACT SAME language. "
-        "Never mix languages."
+        "CRITICAL LANGUAGE RULE: Detect user language. Respond in Vietnamese if the user wrote in Vietnamese, or English if they wrote in English. If the user writes in ANY OTHER LANGUAGE that is neither English nor Vietnamese, YOU MUST DEFAULT TO RESPONDING IN ENGLISH."
     )
 )
 
@@ -477,6 +523,9 @@ root_workflow = Workflow(
              "insert": listing_agent,
              "spatial": spatial_search_agent,
              "simple": simple_search_agent,
+             "security": security_agent,
+             "gibberish": gibberish_agent,
+             "out_of_scope": out_of_scope_agent,
          }),
     ],
 )
