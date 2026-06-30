@@ -569,9 +569,9 @@ const handleSearch = async () => {
                     <span class="field-label">{{ t.price }}:</span>
                     <span class="price-val">{{ msg.data.price?.toLocaleString(currentLang === 'vi' ? 'vi-VN' : 'en-US') }} VND</span>
                   </div>
-                  <p v-if="msg.data.distance_meters !== undefined" class="card-row" style="margin: 0;">
+                  <p v-if="msg.data.distance_meters != null && !isNaN(Number(msg.data.distance_meters))" class="card-row" style="margin: 0;">
                     <i class="fa-solid fa-route field-icon dist-icon"></i>
-                    <strong>{{ t.distance }}:</strong> <span>{{ (msg.data.distance_meters / 1000).toFixed(1) }} km</span>
+                    <strong>{{ t.distance }}:</strong> <span>{{ (Number(msg.data.distance_meters) / 1000).toFixed(1) }} km</span>
                   </p>
                   <p v-if="msg.data.address" class="card-row" style="margin: 0;">
                     <i class="fa-solid fa-location-dot field-icon"></i>
@@ -647,9 +647,9 @@ const handleSearch = async () => {
                     <span class="field-label">{{ t.price }}:</span>
                     <span class="price-val">{{ msg.data.price?.toLocaleString(currentLang === 'vi' ? 'vi-VN' : 'en-US') }} VND</span>
                   </div>
-                  <p v-if="msg.data.distance_meters !== undefined" class="card-row" style="margin: 0;">
+                  <p v-if="msg.data.distance_meters != null && !isNaN(Number(msg.data.distance_meters))" class="card-row" style="margin: 0;">
                     <i class="fa-solid fa-route field-icon dist-icon"></i>
-                    <strong>{{ t.distance }}:</strong> <span>{{ (msg.data.distance_meters / 1000).toFixed(1) }} km</span>
+                    <strong>{{ t.distance }}:</strong> <span>{{ (Number(msg.data.distance_meters) / 1000).toFixed(1) }} km</span>
                   </p>
                   <p class="card-row" style="margin: 0;">
                     <i class="fa-solid fa-location-dot field-icon"></i>

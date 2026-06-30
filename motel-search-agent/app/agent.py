@@ -274,13 +274,14 @@ def calculate_affordability(monthly_income: float) -> dict:
 # 1. Output schema for the classifier agent
 # ---------------------------------------------------------------------------
 class QueryCategory(BaseModel):
-    """Classification output: 'spatial', 'simple', or 'insert'."""
+    """Classification output: 'spatial', 'simple', 'insert', or 'general'."""
 
     category: str = Field(
         description=(
-            "Query type: 'spatial' for location-based/radius searches, "
-            "'simple' for price/amenity-based filters or follow-up room searches, "
-            "'insert' when the user wants to post, list, add, or rent out a new room/property OR when the user asks for affordability/budget consultation based on monthly salary/income."
+            "Query type: 'general' for simple greetings (hi, hello, xin chào) or conversational talk; "
+            "'spatial' for explicit location-based/radius searches; "
+            "'simple' for explicit price/amenity-based filters or follow-up room searches; "
+            "'insert' when the user wants to post a listing OR asks for affordability/budget consultation."
         )
     )
     user_query: str = Field(
@@ -303,9 +304,9 @@ def classify_and_route(ctx: Any, node_input: Any) -> Event:
     """
     Reads the classifier's structured output and emits a routing signal.
     """
-    category = "simple"  # safe default
+    category = "general"  # safe conversational default
     if isinstance(node_input, dict):
-        category = node_input.get("category", "simple")
+        category = node_input.get("category", "general")
     elif hasattr(node_input, "category"):
         category = node_input.category
 
@@ -315,30 +316,44 @@ def classify_and_route(ctx: Any, node_input: Any) -> Event:
         route_value = "insert"
     elif category == "spatial":
         route_value = "spatial"
-    else:
+    elif category == "simple":
         route_value = "simple"
+    else:
+        route_value = "general"
     return Event(route=route_value, output=user_query)
 
 
 # ---------------------------------------------------------------------------
 # 3. LLM Agents
 # ---------------------------------------------------------------------------
+general_agent = LlmAgent(
+    name="general_assistant",
+    model="gemini-3.1-flash-lite-preview",
+    instruction=(
+        "You are SmartHousing AI, an intelligent, friendly, and professional real estate assistant in Vietnam.\n"
+        "The user is greeting you ('hi', 'hello', 'xin chào') or asking general questions about your capabilities.\n"
+        "IMPORTANT: DO NOT call any database search tools or return any JSON card array or brackets [].\n"
+        "Simply respond politely in warm, natural language in the user's language (Vietnamese or English).\n"
+        "Introduce your features briefly: (1) finding rental rooms/houses by price or location/GIS, (2) consulting optimal rental budget based on income (25%-35%), and (3) posting property listings.\n"
+        "Ask how you can assist them today!"
+    ),
+)
+
 categorizer = LlmAgent(
     name="query_classifier",
     model="gemini-3.1-flash-lite-preview",
     output_schema=QueryCategory,
     instruction=(
-        "Analyze the user request and classify it. "
+        "Analyze the user request and classify it. Note: The prompt may automatically append '[Vị trí người dùng / User Location payload: lat=..., lng=...]'. IGNORE this appended location payload when deciding the primary intent of the user's message!\n"
+        "Return 'general' if the user's actual message is just a greeting (e.g. 'hi', 'hello', 'xin chào', 'chào bạn', 'alo') or asking general questions about what you can do without explicitly requesting to search or post a property.\n"
         "Return 'insert' if the user expresses intent to post, add, list, or rent out a new room/property "
-        "(e.g., 'I have a vacant room at...', 'Room for rent at...', 'Post a listing...', "
-        "'Tôi có phòng trọ trống...', 'Cho thuê phòng...', 'Đăng tin...') OR if the user asks for budget/salary/affordability consultation "
-        "('thu nhập', 'lương', 'salary', 'income', 'tư vấn ngân sách', 'khả năng chi trả', 'affordability', 'lương tôi...'). "
-        "Return 'spatial' if the user mentions searching near locations, specific coordinates, proximity, or radius. "
-        "Return 'simple' if the user asks for searching by price ranges, specific room amenities, or searching rooms matching a previously discussed budget. "
-        "Also extract and copy the exact user request string into 'user_query'. "
+        "(e.g., 'I have a vacant room at...', 'Room for rent at...', 'Tôi có phòng trọ trống...', 'Cho thuê phòng...', 'Đăng tin...') OR if the user asks for budget/salary/affordability consultation "
+        "('thu nhập', 'lương', 'salary', 'income', 'tư vấn ngân sách', 'khả năng chi trả', 'affordability').\n"
+        "Return 'spatial' ONLY IF the user explicitly asks to search for rooms near locations, landmarks, coordinates, or radius around their location.\n"
+        "Return 'simple' if the user explicitly asks to search for rooms by price ranges, specific room amenities, or matching a budget.\n"
+        "Also extract and copy the exact user request string into 'user_query'.\n"
         "CRITICAL LANGUAGE RULE: You must automatically detect the language of the user's query (English or Vietnamese). "
-        "You MUST strictly respond, think, and format all output text and JSON data "
-        "in that EXACT SAME language. Never mix languages."
+        "You MUST strictly respond, think, and format all output text and JSON data in that EXACT SAME language. Never mix languages."
     ),
 )
 
@@ -444,6 +459,7 @@ root_workflow = Workflow(
     edges=[
         (START, parse_query, categorizer, classify_and_route,
          {
+             "general": general_agent,
              "insert": listing_agent,
              "spatial": spatial_search_agent,
              "simple": simple_search_agent,
