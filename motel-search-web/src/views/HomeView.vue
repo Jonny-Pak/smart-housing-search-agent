@@ -144,6 +144,14 @@ const formatSessionTime = (timestamp) => {
 const mapInstances = ref({})
 const lastQuery = ref('')
 
+const cleanPriceDisplay = (val) => {
+  if (val == null) return currentLang.value === 'vi' ? 'Đang cập nhật' : 'Updating'
+  const str = String(val).replace(/VND|\s|₫/gi, '').replace(/,/g, '')
+  const num = Number(str)
+  if (isNaN(num)) return val
+  return num.toLocaleString(currentLang.value === 'vi' ? 'vi-VN' : 'en-US') + ' VND'
+}
+
 const initMap = async (item) => {
   await nextTick()
   const mapId = 'map-' + item.data.id
@@ -161,7 +169,7 @@ const initMap = async (item) => {
 
   L.marker([lat, lng])
     .addTo(map)
-    .bindPopup(`<b>🏠 ${title || address}</b><br>${item.data.price?.toLocaleString()} VND`)
+    .bindPopup(`<b>🏠 ${title || address}</b><br>${cleanPriceDisplay(item.data.price)}`)
     .openPopup()
 
   // Detect landmark for radius visualization
@@ -367,6 +375,13 @@ const handleSearch = async () => {
           if (foundCards && foundCards.length > 0 && foundCards[0].ui_type) {
             resultCommitted = true
             isSearching.value = false
+            const firstBracketIdx = rawTextBuffer.indexOf('[')
+            if (firstBracketIdx > 0) {
+              const introText = rawTextBuffer.substring(0, firstBracketIdx).replace(/```json/g, '').replace(/```/g, '').trim()
+              if (introText) {
+                pushMessage({ role: 'ai', type: 'text', content: introText })
+              }
+            }
             foundCards.forEach(item => {
               pushMessage({ role: 'ai', type: 'room-card', ui_type: item.ui_type, data: item.data })
             })
@@ -389,6 +404,10 @@ const handleSearch = async () => {
               const inner = JSON.parse(rawTextBuffer.substring(first, last + 1))
               if (Array.isArray(inner) && inner[0]?.ui_type) {
                 resultCommitted = true
+                if (first > 0) {
+                  const introText = rawTextBuffer.substring(0, first).replace(/```json/g, '').replace(/```/g, '').trim()
+                  if (introText) pushMessage({ role: 'ai', type: 'text', content: introText })
+                }
                 inner.forEach(item => pushMessage({ role: 'ai', type: 'room-card', ui_type: item.ui_type, data: item.data }))
                 nextTick(() => inner.forEach(item => { if (item.ui_type === 'A2UI_MapCard') initMap(item) }))
                 return
@@ -567,7 +586,7 @@ const handleSearch = async () => {
                   <div v-if="msg.data.price" class="card-row">
                     <i class="fa-solid fa-money-bill-wave field-icon price-icon"></i>
                     <span class="field-label">{{ t.price }}:</span>
-                    <span class="price-val">{{ msg.data.price?.toLocaleString(currentLang === 'vi' ? 'vi-VN' : 'en-US') }} VND</span>
+                    <span class="price-val">{{ cleanPriceDisplay(msg.data.price) }}</span>
                   </div>
                   <p v-if="msg.data.distance_meters != null && !isNaN(Number(msg.data.distance_meters))" class="card-row" style="margin: 0;">
                     <i class="fa-solid fa-route field-icon dist-icon"></i>
@@ -645,7 +664,7 @@ const handleSearch = async () => {
                   <div class="card-row">
                     <i class="fa-solid fa-money-bill-wave field-icon price-icon"></i>
                     <span class="field-label">{{ t.price }}:</span>
-                    <span class="price-val">{{ msg.data.price?.toLocaleString(currentLang === 'vi' ? 'vi-VN' : 'en-US') }} VND</span>
+                    <span class="price-val">{{ cleanPriceDisplay(msg.data.price) }}</span>
                   </div>
                   <p v-if="msg.data.distance_meters != null && !isNaN(Number(msg.data.distance_meters))" class="card-row" style="margin: 0;">
                     <i class="fa-solid fa-route field-icon dist-icon"></i>
