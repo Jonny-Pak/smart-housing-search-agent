@@ -1,0 +1,21 @@
+name: "motel-search-agent"
+acli_version: "0.5.0"
+agent_directory: "app"
+region: "us-east1"
+base_template: "adk"
+generated_at: "2026-06-21T18:18:19.946885+00:00"
+language: "python"
+create_params:
+  deployment_target: "agent_runtime"
+  session_type: "none"
+  cicd_runner: "skip"
+  include_data_ingestion: false
+  
+  datastore: "none"
+  agent_guidance_filename: "GEMINI.md"
+mcpServers:
+  motel_backend:
+    command: "python"
+    args: ["app/mcp_server.py"]
+    env:
+      DATABASE_URL: "postgresql://Jonny-Pak:190705@localhost:5432/motel_db"
