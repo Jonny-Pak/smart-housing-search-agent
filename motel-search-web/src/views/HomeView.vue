@@ -1049,6 +1049,7 @@ h1 { font-size: 1.8rem; font-weight: 700; margin: 0; letter-spacing: -0.5px; col
 .bubble {
   max-width: 68%; padding: 0.75rem 1.1rem;
   border-radius: 16px; font-size: 0.92rem; line-height: 1.55;
+  white-space: pre-line;
 }
 .bubble.ai {
   background: #fff; color: #1e293b;
