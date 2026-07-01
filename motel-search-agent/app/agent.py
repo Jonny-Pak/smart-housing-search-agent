@@ -37,7 +37,7 @@ def query_database(price_max: int = 5000000, property_type: str = None, user_lat
     """Queries the PostgreSQL room database based on maximum price, optional property_type, and optional user location (user_lat, user_lng)."""
     try:
         if price_max is not None and int(price_max) < 0:
-            return [{"error": "Giá thuê không hợp lệ. Giá thuê nhà/phòng trọ không được là số âm. Vui lòng nhập lại mức giá hợp lệ / Rental price cannot be negative."}]
+            return [{"error": "⚠️ Giá thuê nhà/phòng trọ không được là số âm.\n\nVui lòng nhập lại mức giá hợp lệ để tôi hỗ trợ tìm kiếm."}]
         # 1. Establish connection to PostgreSQL using environment variables
         conn = psycopg2.connect(
             dbname=os.getenv("DB_NAME", "postgres"),
@@ -203,11 +203,11 @@ def add_new_room(address: str, price: int, phone: str, property_type: str = 'pho
         # 0. Validate required fields and Vietnamese phone number (must be exactly 10 digits)
         cleaned_phone = "".join(filter(str.isdigit, str(phone)))
         if not address or not address.strip():
-            return [{"error": "Vui lòng cung cấp địa chỉ đầy đủ của bất động sản đang muốn cho thuê."}]
+            return [{"error": "⚠️ Vui lòng cung cấp địa chỉ đầy đủ của bất động sản đang muốn cho thuê."}]
         if not price or int(price) <= 0:
-            return [{"error": "Vui lòng cung cấp giá thuê hợp lệ theo tháng."}]
+            return [{"error": "⚠️ Vui lòng cung cấp giá thuê hợp lệ theo tháng (phải là số dương > 0)."}]
         if len(cleaned_phone) != 10 or not cleaned_phone.startswith("0"):
-            return [{"error": "Số điện thoại liên hệ không hợp lệ. Vui lòng nhập số điện thoại tại Việt Nam gồm đúng 10 chữ số (bắt đầu bằng số 0)."}]
+            return [{"error": "⚠️ Số điện thoại liên hệ không hợp lệ.\n\nVui lòng nhập số điện thoại tại Việt Nam gồm đúng 10 chữ số (bắt đầu bằng số 0)."}]
 
         pt = normalize_property_type(property_type) or 'phong_tro'
 
@@ -221,7 +221,7 @@ def add_new_room(address: str, price: int, phone: str, property_type: str = 'pho
             data = json.loads(response.read().decode())
 
         if not data:
-            return [{"error": "Could not locate this address on the map. Please provide more detail (e.g., street name, district)."}]
+            return [{"error": "❌ Không thể định vị địa chỉ này trên bản đồ.\n\nVui lòng cung cấp chi tiết hơn (tên đường, phường/xã, quận/huyện)."}]
 
         lat = float(data[0]['lat'])
         lng = float(data[0]['lon'])
@@ -254,11 +254,11 @@ def add_new_room(address: str, price: int, phone: str, property_type: str = 'pho
             "property_type": pt,
             "lat": lat,
             "lng": lng,
-            "message": f"Bất động sản tại '{address}' đã được định vị ({lat:.4f}, {lng:.4f}) và thêm vào hệ thống (hết hạn sau 7 ngày)."
+            "message": f"✅ Bất động sản tại '{address}' đã được thêm vào hệ thống.\n\n📍 Tọa độ GIS: ({lat:.4f}, {lng:.4f}).\n⏳ Thời gian hiển thị: 7 ngày."
         }]
     except Exception as e:
         print(f"[DB ERROR - INSERT] Failed to insert room: {e}")
-        return [{"error": str(e), "message": "Listing failed due to a system error or the address could not be geolocated."}]
+        return [{"error": str(e), "message": "❌ Đăng tin không thành công do lỗi hệ thống hoặc không tìm thấy tọa độ GIS."}]
 
 
 def calculate_affordability(monthly_income: float) -> dict:
@@ -270,19 +270,19 @@ def calculate_affordability(monthly_income: float) -> dict:
     try:
         income = float(monthly_income)
         if income < 0:
-            return {"error": "Mức thu nhập hàng tháng không được là số âm. Vui lòng cung cấp số dương hợp lệ / Monthly income cannot be negative."}
+            return {"error": "⚠️ Mức thu nhập hàng tháng không được là số âm.\n\nVui lòng cung cấp số tiền dương hợp lệ để tôi hỗ trợ tư vấn."}
         min_budget = income * 0.25
         max_budget = income * 0.35
         return {
             "monthly_income": income,
             "min": min_budget,
             "max": max_budget,
-            "advice": f"Với thu nhập {income:,.0f} VND/tháng, bạn nên chọn phòng trọ trong khoảng {min_budget:,.0f} - {max_budget:,.0f} VND để cân đối chi tiêu.",
-            "advice_vi": f"Với thu nhập {income:,.0f} VND/tháng, bạn nên chọn phòng trọ trong khoảng {min_budget:,.0f} - {max_budget:,.0f} VND để cân đối chi tiêu.",
-            "advice_en": f"With a monthly income of {income:,.0f} VND, your optimal rental budget is between {min_budget:,.0f} and {max_budget:,.0f} VND to balance your expenses."
+            "advice": f"💡 Với thu nhập {income:,.0f} VND/tháng, bạn nên chọn phòng trọ trong khoảng:\n\n👉 {min_budget:,.0f} - {max_budget:,.0f} VND/tháng để cân đối chi tiêu.",
+            "advice_vi": f"💡 Với thu nhập {income:,.0f} VND/tháng, bạn nên chọn phòng trọ trong khoảng:\n\n👉 {min_budget:,.0f} - {max_budget:,.0f} VND/tháng để cân đối chi tiêu.",
+            "advice_en": f"💡 With a monthly income of {income:,.0f} VND, your optimal rental budget is:\n\n👉 {min_budget:,.0f} - {max_budget:,.0f} VND/month to balance living expenses."
         }
     except Exception as e:
-        return {"error": "Vui lòng cung cấp thu nhập hàng tháng hợp lệ."}
+        return {"error": "⚠️ Vui lòng cung cấp thu nhập hàng tháng hợp lệ bằng số."}
 
 
 
